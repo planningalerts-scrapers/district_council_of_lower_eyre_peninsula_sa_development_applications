@@ -85,6 +85,12 @@ interface Element extends Rectangle {
     text: string
 }
 
+// A cell in a grid (owning zero, one or more elements).
+
+interface Cell extends Rectangle {
+    elements: Element[]
+}
+
 // Reads all the address information into global objects.
 
 function readAddressInformation() {
@@ -120,6 +126,34 @@ function readAddressInformation() {
             SuburbNames["MT. " + suburbName.substring("MOUNT ".length)] = suburbTokens[1].trim();
         }
     }
+}
+
+// Constructs a rectangle based on the intersection of the two specified rectangles.
+
+function intersect(rectangle1: Rectangle, rectangle2: Rectangle): Rectangle {
+    let x1 = Math.max(rectangle1.x, rectangle2.x);
+    let y1 = Math.max(rectangle1.y, rectangle2.y);
+    let x2 = Math.min(rectangle1.x + rectangle1.width, rectangle2.x + rectangle2.width);
+    let y2 = Math.min(rectangle1.y + rectangle1.height, rectangle2.y + rectangle2.height);
+    if (x2 >= x1 && y2 >= y1)
+        return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    else
+        return { x: 0, y: 0, width: 0, height: 0 };
+}
+
+// Calculates the fraction of an element that lies within a cell (as a percentage).  For example,
+// if a quarter of the specifed element lies within the specified cell then this would return 25.
+
+function getPercentageOfElementInCell(element: Element, cell: Cell) {
+    let elementArea = getArea(element);
+    let intersectionArea = getArea(intersect(cell, element));
+    return (elementArea === 0) ? 0 : ((intersectionArea * 100) / elementArea);
+}
+
+// Calculates the area of a rectangle.
+
+function getArea(rectangle: Rectangle) {
+    return rectangle.width * rectangle.height;
 }
 
 // Gets the percentage of horizontal overlap between two rectangles (0 means no overlap and 100
@@ -159,9 +193,7 @@ function formatStreetName(text: string) {
     tokens.push((streetSuffix === undefined) ? token : streetSuffix);
 
     // Extract tokens from the end of the array until a valid street name is encountered (this
-    // looks for an exact match).  Note that "PRINCESS MARGARET ROSE CAVES ROAD" is the street
-    // name with the most words (ie. five).  But there may be more words in the street name due
-    // to errant spaces.
+    // looks for an exact match).
 
     for (let index = 6; index >= 2; index--)
         if (StreetNames[tokens.slice(-index).join(" ")] !== undefined)
@@ -209,6 +241,102 @@ function formatAddress(address: string) {
     return formatStreetName(streetName) + ", " + SuburbNames[suburbName];
 }
 
+// Examines all the lines in a page of a PDF and constructs cells (ie. rectangles) based on those
+// lines.
+
+async function parseCells(page) {
+    let operators = await page.getOperatorList();
+
+    // Find the lines.  Each line is actually constructed using a rectangle with a very short
+    // height or a very narrow width.
+
+    let lines: Rectangle[] = [];
+
+    let previousRectangle = undefined;
+    let transformStack = [];
+    let transform = [ 1, 0, 0, 1, 0, 0 ];
+    transformStack.push(transform);
+
+    for (let index = 0; index < operators.fnArray.length; index++) {
+        let argsArray = operators.argsArray[index];
+
+        if (operators.fnArray[index] === pdfjs.OPS.restore)
+            transform = transformStack.pop();
+        else if (operators.fnArray[index] === pdfjs.OPS.save)
+            transformStack.push(transform);
+        else if (operators.fnArray[index] === pdfjs.OPS.transform)
+            transform = pdfjs.Util.transform(transform, argsArray);
+        else if (operators.fnArray[index] === pdfjs.OPS.constructPath) {
+            let argumentIndex = 0;
+            for (let operationIndex = 0; operationIndex < argsArray[0].length; operationIndex++) {
+                if (argsArray[0][operationIndex] === pdfjs.OPS.moveTo)
+                    argumentIndex += 2;
+                else if (argsArray[0][operationIndex] === pdfjs.OPS.lineTo)
+                    argumentIndex += 2;
+                else if (argsArray[0][operationIndex] === pdfjs.OPS.rectangle) {
+                    let x1 = argsArray[1][argumentIndex++];
+                    let y1 = argsArray[1][argumentIndex++];
+                    let width = argsArray[1][argumentIndex++];
+                    let height = argsArray[1][argumentIndex++];
+                    let x2 = x1 + width;
+                    let y2 = y1 + height;
+                    [x1, y1] = pdfjs.Util.applyTransform([x1, y1], transform);
+                    [x2, y2] = pdfjs.Util.applyTransform([x2, y2], transform);
+                    width = x2 - x1;
+                    height = y2 - y1;
+                    previousRectangle = { x: x1, y: y1, width: width, height: height };
+                }
+            }
+        } else if ((operators.fnArray[index] === pdfjs.OPS.fill || operators.fnArray[index] === pdfjs.OPS.eoFill) && previousRectangle !== undefined) {
+            lines.push(previousRectangle);
+            previousRectangle = undefined;
+        }
+    }
+
+    // Determine all the horizontal lines and vertical lines that make up the grid.  The following
+    // is careful to ignore the short lines and small rectangles that could make up vector images
+    // outside of the grid (such as a logo).  Otherwise these short lines would cause problems due
+    // to the additional cells that they would cause to be constructed later.
+
+    let horizontalLines: Rectangle[] = [];
+    let verticalLines: Rectangle[] = [];
+
+    for (let line of lines) {
+        if (line.height <= 2 && line.width >= 200) {
+            // Identify a horizontal line (these typically extend across the width of the page).
+
+            horizontalLines.push(line);
+        } else if (line.width <= 2 && line.height >= 10) {
+            // Identify a vertical line (note that these might not be very tall if there are not
+            // many development applications in the grid).
+
+            verticalLines.push(line);
+        }
+    }
+
+    let verticalLineComparer = (a, b) => (a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0);
+    verticalLines.sort(verticalLineComparer);
+
+    let horizontalLineComparer = (a, b) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : 0);
+    horizontalLines.sort(horizontalLineComparer);
+    
+    // Construct cells based on the grid of lines.
+
+    let cells: Cell[] = [];
+
+    for (let horizontalLineIndex = 0; horizontalLineIndex < horizontalLines.length - 1; horizontalLineIndex++) {
+        for (let verticalLineIndex = 0; verticalLineIndex < verticalLines.length - 1; verticalLineIndex++) {
+            let horizontalLine = horizontalLines[horizontalLineIndex];
+            let nextHorizontalLine = horizontalLines[horizontalLineIndex + 1];
+            let verticalLine = verticalLines[verticalLineIndex];
+            let nextVerticalLine = verticalLines[verticalLineIndex + 1];
+            cells.push({ elements: [], x: verticalLine.x, y: horizontalLine.y, width: nextVerticalLine.x - verticalLine.x, height: nextHorizontalLine.y - horizontalLine.y });
+        }
+    }
+
+    return cells;
+}
+
 // Parses the text elements from a page of a PDF.
 
 async function parseElements(page) {
@@ -251,201 +379,183 @@ async function parsePdf(url: string) {
 
     // Parse the PDF.  Each page has the details of multiple applications.
 
-    let receivedDateHeadingElement: Element;
-    let lotNumberHeadingElement: Element;
-    let houseNumberHeadingElement: Element;
-    let streetNameHeadingElement: Element;
-    let planHeadingElement: Element;
-    let suburbNameHeadingElement: Element;
-    let descriptionHeadingElement: Element;
-
     let pdf = await pdfjs.getDocument({ data: buffer, disableFontFace: true, ignoreErrors: true });
     for (let pageIndex = 0; pageIndex < pdf.numPages; pageIndex++) {
         console.log(`Reading and parsing applications from page ${pageIndex + 1} of ${pdf.numPages}.`);
         let page = await pdf.getPage(pageIndex + 1);
 
+        // Construct cells (ie. rectangles) based on the horizontal and vertical line segments
+        // in the PDF page.
+
+        let cells = await parseCells(page);
+
         // Construct elements based on the text in the PDF page.
 
         let elements = await parseElements(page);
 
-        // The co-ordinate system used in a PDF is typically "upside done" so invert the
+        // The co-ordinate system used in a PDF is typically "upside down" so invert the
         // co-ordinates (and so this makes the subsequent logic easier to understand).
+
+        for (let cell of cells)
+            cell.y = -(cell.y + cell.height);
 
         for (let element of elements)
             element.y = -(element.y + element.height);
+
+        // Sort the cells by approximate Y co-ordinate and then by X co-ordinate.
+
+        let cellComparer = (a, b) => (Math.abs(a.y - b.y) < 2) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
+        cells.sort(cellComparer);
 
         // Sort the text elements by approximate Y co-ordinate and then by X co-ordinate.
 
         let elementComparer = (a, b) => (Math.abs(a.y - b.y) < 1) ? ((a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0)) : ((a.y > b.y) ? 1 : -1);
         elements.sort(elementComparer);
 
-        // Find the first column of elements.  Each element in the first column should contain
-        // a development application number, for example, "371/002/17" or a column heading, for
-        // example, "DEV NO.".
+        // Allocate each element to an "owning" cell.
 
-        let leftmostElement = elements.reduce(((previous, current) => previous === undefined ? current : (current.x < previous.x ? current : previous)), undefined);
-        let leftmostElements = elements.filter(element => Math.abs(element.x - leftmostElement.x) < 20);
-        let yComparer = (a, b) => (a.y > b.y) ? 1 : ((a.y < b.y) ? -1 : 0);
-        leftmostElements.sort(yComparer);
+        for (let element of elements) {
+            let ownerCell = cells.find(cell => getPercentageOfElementInCell(element, cell) > 50);  // at least 50% of the element must be within the cell deemed to be the owner
+            if (ownerCell !== undefined)
+                ownerCell.elements.push(element);
+        }
 
-        // Use the first column of elements as anchor points (the bottom, left corner is the best
-        // starting point as all text for a line is bottom justified relative to the development
-        // application number element).
+        // Group the cells into rows.
 
-        for (let index = 0; index < leftmostElements.length; index++) {
-            // Obtain all text elements for the current development application.
+        let rows: Cell[][] = [];
+        for (let cell of cells) {
+            let row = rows.find(row => Math.abs(row[0].y - cell.y) < 2);  // approximate Y co-ordinate match
+            if (row === undefined)
+                rows.push([ cell ]);  // start a new row
+            else
+                row.push(cell);  // add to an existing row
+        }
 
-            let row = elements.filter(element => element.y <= leftmostElements[index].y && (index === 0 || element.y > leftmostElements[index - 1].y));
-            let leftmostElement = leftmostElements[index];
+        // Check that there is at least one row (even if it is just the heading row).
 
-            // Extract the column headings.  Note that there is typically a different set of
-            // column headings half way through the document; these represent the continuation of
-            // information for development applications that was too long to fit on a single line
-            // earlier in the document.
+        if (rows.length === 0) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because no rows were found (based on the grid).  Elements: ${elementSummary}`);
+            continue;
+        }
 
-            if (index === 0 && leftmostElement.text.toUpperCase().replace(/[^A-Z]/g, "") === "DEVNO") {
-                receivedDateHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "LODGED");
-                lotNumberHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "LOTNO");
-                houseNumberHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "STNO");
-                streetNameHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "STNAME");
-                planHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "FPDP");
-                suburbNameHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "SUBURBHDOF");
-                descriptionHeadingElement = row.find(element => element.text.toUpperCase().replace(/[^A-Z]/g, "") === "DESCRIPTIONOFDEVELOPMENT");
+        // Ensure the rows are sorted by Y co-ordinate and that the cells in each row are sorted
+        // by X co-ordinate (this is really just a safety precaution because the earlier sorting
+        // of cells in the parseCells function should have already ensured this).
+
+        let rowComparer = (a, b) => (a[0].y > b[0].y) ? 1 : ((a[0].y < b[0].y) ? -1 : 0);
+        rows.sort(rowComparer);
+
+        let rowCellComparer = (a, b) => (a.x > b.x) ? 1 : ((a.x < b.x) ? -1 : 0);
+        for (let row of rows)
+            row.sort(rowCellComparer);
+
+        // Find the heading cells.
+
+        let applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "d/anumber"));
+        let receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "received"));
+        let legalDescriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "allotmentor"));
+        let streetNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "streetname"));
+        let suburbNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "town"));
+        let descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "proposal"));
+
+        if (applicationNumberHeadingCell === undefined) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because the "D/A Number" column heading was not found.  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        if (streetNameHeadingCell === undefined) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because the "Street Name" column heading was not found.  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        if (suburbNameHeadingCell === undefined) {
+            let elementSummary = elements.map(element => `[${element.text}]`).join("");
+            console.log(`No development applications can be parsed from the current page because the "Town" column heading was not found.  Elements: ${elementSummary}`);
+            continue;
+        }
+
+        // Try to extract a development application from each row (some rows, such as the heading
+        // row, will not actually contain a development application).
+
+        for (let row of rows) {
+            let applicationNumberCell = row.find(cell => getHorizontalOverlapPercentage(cell, applicationNumberHeadingCell) > 90);
+            let receivedDateCell = row.find(cell => getHorizontalOverlapPercentage(cell, receivedDateHeadingCell) > 90);
+            let legalDescriptionCell = row.find(cell => getHorizontalOverlapPercentage(cell, legalDescriptionHeadingCell) > 90);
+            let streetNameCell = row.find(cell => getHorizontalOverlapPercentage(cell, streetNameHeadingCell) > 90);
+            let suburbNameCell = row.find(cell => getHorizontalOverlapPercentage(cell, suburbNameHeadingCell) > 90);
+            let descriptionCell = row.find(cell => getHorizontalOverlapPercentage(cell, descriptionHeadingCell) > 90);
+
+            // Construct the application number.
+
+            if (applicationNumberCell === undefined)
+                continue;
+            let applicationNumber = applicationNumberCell.elements.map(element => element.text).join("").trim();
+            if (!/[0-9]+\/[0-9]+\/[0-9]+/.test(applicationNumber))  // an application number must be present, for example, "910/144/16"
+                continue;
+            console.log(`Found development application ${applicationNumber}.`);
+
+            // Construct the address.
+
+            if (streetNameCell === undefined) {
+                console.log("Ignoring the development application because it has no street name cell.");
+                continue;
+            } else if (suburbNameCell === undefined) {
+                console.log("Ignoring the development application because it has no suburb name cell.");
+                continue;
+            }
+            
+            let streetName = streetNameCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+            let suburbName = suburbNameCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+
+            if (streetName === "") {
+                console.log("Ignoring the development application because it has no street name.");
+                continue;
+            } else if (suburbName === "") {
+                console.log("Ignoring the development application because it has no suburb name.");
                 continue;
             }
 
-            // Development application details.
-
-            let receivedDateElements = row.filter(element => getHorizontalOverlapPercentage(receivedDateHeadingElement, element) > 0);
-            let lotNumberElements = row.filter(element => getHorizontalOverlapPercentage(lotNumberHeadingElement, element) > 0);
-            let houseNumberElements = row.filter(element => getHorizontalOverlapPercentage(houseNumberHeadingElement, element) > 0);
-            let streetNameElements = row.filter(element => getHorizontalOverlapPercentage(streetNameHeadingElement, element) > 0);
-            let planElements = row.filter(element => getHorizontalOverlapPercentage(planHeadingElement, element) > 0);
-            let suburbNameElements = row.filter(element => getHorizontalOverlapPercentage(suburbNameHeadingElement, element) > 0);
-            let descriptionElements = row.filter(element => getHorizontalOverlapPercentage(descriptionHeadingElement, element) > 0);
-
-            // Get the application number.
-
-            let applicationNumber = leftmostElements[index].text.replace(/\s/g, "").trim();
-
-            // Get the received date.
-
-            let receivedDate = moment.invalid();
-            if (receivedDateElements !== undefined)
-                receivedDate = moment(receivedDateElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim(), "D-MMM-YY", true);
-
-            // Get the lot number.
-
-            let lotNumber = "";
-            if (lotNumberElements !== undefined)
-                lotNumber = lotNumberElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            // Get the house number.
-
-            let houseNumber = "";
-            if (houseNumberElements !== undefined)
-                houseNumber = houseNumberElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            // Get the street name.
-
-            let streetName = "";
-            if (streetNameElements !== undefined)
-                streetName = streetNameElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            // Get the plan (ie. the "filed plan" or "deposited plan").
-
-            let plan = "";
-            if (planElements !== undefined)
-                plan = planElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            // Get the suburb name (and sometimes the hundred name).
-
-            let suburbName = "";
-            let hundredName = "";
-
-            if (suburbNameElements !== undefined)
-                suburbName = suburbNameElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-
-            let suburbNameTokens = suburbName.split("/");
-            if (suburbNameTokens.length === 2) {
-                if (/^HD /.test(suburbNameTokens[1].trim())) {
-                    hundredName = suburbNameTokens[1].trim();  // for example, "EMU FLAT/HD CLARE"
-                    suburbName = suburbNameTokens[0].trim();
-                } else {
-                    hundredName = suburbNameTokens[0].trim();  // for example, "HD CLARE/EMU FLAT" or "WATERLOO / MARRABEL"
-                    suburbName = suburbNameTokens[1].trim();
-                }
+            let address = formatAddress(streetName + ", " + suburbName);
+            if (address === "") {  // an address must be present
+                console.log("Ignoring the development application because the address is blank.");
+                continue;
             }
 
-            hundredName = hundredName.replace(/^HD /i, "");
-            suburbName = suburbName.replace(/^HD /i, "");
-
-            let address = formatAddress((streetName !== "" && suburbName !== "") ? `${houseNumber} ${streetName}, ${suburbName}`.toUpperCase() : "");
-
-            // Get the description.
+            // Construct the description.
 
             let description = "";
-            if (descriptionElements !== undefined)
-                description = descriptionElements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
-            if (description === "")
-                description = "No Description Provided"
+            if (descriptionCell !== undefined)
+                description = descriptionCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
+
+            // Construct the received date.
+
+            let receivedDate = moment.invalid();
+            if (receivedDateCell !== undefined && receivedDateCell.elements.length > 0)
+                receivedDate = moment(receivedDateCell.elements[0].text.trim(), "D/MM/YYYY", true);
 
             // Construct the legal description.
 
-            let legalDescriptionItems = []
-            if (lotNumber !== "")
-                legalDescriptionItems.push(`Lot ${lotNumber}`);
-            if (plan !== "")
-                legalDescriptionItems.push(`Plan ${plan}`);
-            if (hundredName !== "")
-                legalDescriptionItems.push(`Hundred ${hundredName}`);
-            let legalDescription = legalDescriptionItems.join(", ");
+            let legalDescription = "";
+            if (legalDescriptionCell !== undefined)
+                legalDescription = legalDescriptionCell.elements.map(element => element.text).join(" ").replace(/\s\s+/g, " ").trim();
 
-            // Create an object containing all details of the development application.
-
-            let developmentApplication = developmentApplications[applicationNumber];
-            if (developmentApplication === undefined) {
-                developmentApplication = {
-                    applicationNumber: applicationNumber,
-                    address: "",
-                    description: "No Description Provided",
-                    informationUrl: url,
-                    commentUrl: CommentUrl,
-                    scrapeDate: moment().format("YYYY-MM-DD"),
-                    receivedDate: "",
-                    legalDescription: ""
-                };
-                developmentApplications[applicationNumber] = developmentApplication;
-            }
-
-            if (receivedDateHeadingElement !== undefined)
-                developmentApplication.receivedDate = receivedDate.isValid() ? receivedDate.format("YYYY-MM-DD") : "";
-            if (houseNumberHeadingElement !== undefined || streetNameHeadingElement !== undefined || suburbNameHeadingElement !== undefined)
-                developmentApplication.address = address;
-            if (lotNumberHeadingElement !== undefined || planHeadingElement !== undefined || suburbNameHeadingElement !== undefined)
-                developmentApplication.legalDescription = legalDescription;
-            if (descriptionHeadingElement !== undefined && description !== "")
-                developmentApplication.description = description;
+            developmentApplications.push({
+                applicationNumber: applicationNumber,
+                address: address,
+                description: ((description === "") ? "No Description Provided" : description),
+                informationUrl: url,
+                commentUrl: CommentUrl,
+                scrapeDate: moment().format("YYYY-MM-DD"),
+                receivedDate: receivedDate.isValid() ? receivedDate.format("YYYY-MM-DD") : "",
+                legalDescription: legalDescription
+            });        
         }
     }
 
-    // Remove any development applications with invalid addresses or application numbers.
-
-    let filteredDevelopmentApplications = [];
-    let previousApplicationNumber;
-    for (let developmentApplication of Object.values(developmentApplications)) {
-        if (developmentApplication.applicationNumber === "") {
-            console.log(`Ignoring a development application because the application number was blank.${(previousApplicationNumber === undefined) ? "" : ("  The previous application number was " + previousApplicationNumber + ".")}`);
-            continue;
-        } else if (developmentApplication.address === "") {
-            console.log(`Ignoring development application ${developmentApplication.applicationNumber} because the address was blank (the street name or suburb name is blank).${(previousApplicationNumber === undefined) ? "" : ("  The previous application number was " + previousApplicationNumber + ".")}`);
-            continue;
-        }
-        previousApplicationNumber = developmentApplication.applicationNumber;
-        filteredDevelopmentApplications.push(developmentApplication);
-    }
-
-    return filteredDevelopmentApplications;
+    return developmentApplications;
 }
 
 // Gets a random integer in the specified range: [minimum, maximum).
