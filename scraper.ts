@@ -455,6 +455,8 @@ async function parsePdf(url: string) {
         let applicationNumberHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "d/anumber"));
         let receivedDateHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "received"));
         let legalDescriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "allotmentor"));
+        if (legalDescriptionHeadingCell === undefined)
+            legalDescriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "allotment/"));
         let streetNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "streetname"));
         let suburbNameHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "town"));
         let descriptionHeadingCell = cells.find(cell => cell.elements.some(element => element.text.toLowerCase().replace(/\s/g, "") === "proposal"));
