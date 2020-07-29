@@ -17,7 +17,7 @@ import didYouMean, * as didyoumean from "didyoumean2";
 
 sqlite3.verbose();
 
-const DevelopmentApplicationsUrl = "https://www.lowereyrepeninsula.sa.gov.au/page.aspx?u=265";
+const DevelopmentApplicationsUrl = "https://www.lowereyrepeninsula.sa.gov.au/services/development";
 const CommentUrl = "mailto:mail@dclep.sa.gov.au";
 
 declare const process: any;
@@ -59,7 +59,7 @@ async function insertRow(database, developmentApplication) {
                 console.error(error);
                 reject(error);
             } else {
-                console.log(`    Saved: application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\", legal description \"${developmentApplication.legalDescription}\" and received date \"${developmentApplication.receivedDate}\" into the database.`);
+                console.log(`    Saved application \"${developmentApplication.applicationNumber}\" with address \"${developmentApplication.address}\", description \"${developmentApplication.description}\", legal description \"${developmentApplication.legalDescription}\" and received date \"${developmentApplication.receivedDate}\" to the database.`);
                 sqlStatement.finalize();  // releases any locks
                 resolve(row);
             }
@@ -589,11 +589,11 @@ async function main() {
     let $ = cheerio.load(body);
     
     let pdfUrls: string[] = [];
-    for (let element of $("p a").get()) {
+    for (let element of $("ul li a").get()) {
         let pdfUrl = new urlparser.URL(element.attribs.href, DevelopmentApplicationsUrl).href;
         if (pdfUrl.toLowerCase().includes("register") && pdfUrl.toLowerCase().includes(".pdf"))
             if (!pdfUrls.some(url => url === pdfUrl))  // avoid duplicates
-                pdfUrls.push(pdfUrl);
+                pdfUrls.unshift(pdfUrl);
     }
 
     // Always parse the most recent PDF file and randomly select one other PDF file to parse.
